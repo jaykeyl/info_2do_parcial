@@ -11,6 +11,80 @@ var state
 @export var offset: int
 @export var y_offset: int
 
+#score y modos de juego
+@export_enum("MOVES", "TIME")
+var game_mode: String = "MOVES"
+var game_ended: bool = false  
+
+@export var target_score: int = 1000
+@export var starting_moves: int = 20
+@export var starting_time: int = 60
+
+@export var points_per_piece: int = 10
+@export var combo_bonus: float = 0.25
+func calculate_dynamic_target() -> int:
+	var movements := starting_moves
+	var time_seconds := starting_time
+	var ppp := points_per_piece
+
+	#valores aleatrios
+	var avg_matches_per_turn := randi_range(3, 5)
+	var cascade_factor := randf_range(1.1, 1.4)
+	var difficulty_factor := randf_range(0.9, 1.2)
+
+	var result := 0
+
+	if game_mode == "MOVES":
+		result = int(movements * avg_matches_per_turn * ppp * cascade_factor * difficulty_factor)
+	elif game_mode == "TIME":
+		var avg_time_per_turn := 3.0 
+		var turns := float(time_seconds) / avg_time_per_turn
+		result = int(turns * avg_matches_per_turn * ppp * cascade_factor * difficulty_factor)
+
+	return max(10, result)
+
+
+var current_score: int = 0
+var moves_left: int = 0
+var time_left: int = 0
+
+var cascade_depth: int = 0
+var consumed_move: bool = false
+
+func _ui():
+	return get_parent().get_node_or_null("top_ui")
+
+func _msg_label():
+	return get_parent().get_node_or_null("msg_label")
+
+func _update_ui() -> void:
+	var ui = _ui()
+	if ui == null: return
+	if ui.has_method("set_score"):
+		ui.set_score(current_score)
+	if game_mode == "MOVES":
+		if ui.has_method("set_moves"): ui.set_moves(moves_left)
+	else:
+		if ui.has_method("set_time"): ui.set_time(time_left)
+
+func _begin_run_after_successful_swap() -> void:
+	if not consumed_move:
+		consumed_move = true
+		if game_mode == "MOVES":
+			moves_left = max(0, moves_left - 1)
+			_update_ui()
+		print("[Moves] Successful move consumed. Remaining:", moves_left)
+
+func _maybe_finish_run() -> void:
+	consumed_move = false
+	cascade_depth = 0
+	if game_mode == "MOVES" and moves_left <= 0:
+		if current_score >= target_score:
+			game_won()
+		else:
+			game_over()
+
+
 var possible_pieces = [
 	preload("res://scenes/blue_piece.tscn"),
 	preload("res://scenes/green_piece.tscn"),
@@ -20,35 +94,55 @@ var possible_pieces = [
 	preload("res://scenes/orange_piece.tscn"),
 ]
 
-# 2D board
 var all_pieces = []
 
-# swap bookkeeping
 var piece_one = null
 var piece_two = null
 var last_place = Vector2.ZERO
 var last_direction = Vector2.ZERO
 var move_checked = false
 
-# touch
 var first_touch = Vector2.ZERO
 var final_touch = Vector2.ZERO
 var is_controlling = false
-
 
 # lifecycle
 func _ready():
 	state = MOVE
 	randomize()
 	all_pieces = make_2d_array()
+
+	#autoload !!
+	game_mode      = GameConfig.game_mode
+	starting_moves = GameConfig.starting_moves
+	starting_time  = GameConfig.starting_time
+	points_per_piece = points_per_piece
+
+	target_score = calculate_dynamic_target()
+
 	spawn_pieces()
+
+	current_score = 0
+	moves_left = starting_moves
+	time_left = starting_time
+	_update_ui()
+
+	var ui = _ui()
+	if ui and ui.has_method("set_mode"): ui.set_mode(game_mode)
+	if ui and ui.has_method("set_target"): ui.set_target(target_score)
+
+	#timer
+	if game_mode == "TIME":
+		var t: Timer = get_parent().get_node_or_null("game_timer")
+		if t:
+			time_left = starting_time
+			t.start()
+			_update_ui()
 
 func _process(_delta):
 	if state == MOVE:
 		touch_input()
 
-
-# drid helpers
 func make_2d_array():
 	var array = []
 	for i in width:
@@ -78,8 +172,6 @@ func _get_piece(i: int, j: int):
 func _set_piece(i: int, j: int, p):
 	all_pieces[i][j] = p
 
-
-# spawn and refill
 func spawn_pieces():
 	for i in width:
 		for j in height:
@@ -98,12 +190,10 @@ func spawn_pieces():
 			all_pieces[i][j] = piece
 
 func match_at(i, j, color):
-	# check left
 	if i > 1:
 		if all_pieces[i - 1][j] != null and all_pieces[i - 2][j] != null:
 			if all_pieces[i - 1][j].color == color and all_pieces[i - 2][j].color == color:
 				return true
-	# check down
 	if j > 1:
 		if all_pieces[i][j - 1] != null and all_pieces[i][j - 2] != null:
 			if all_pieces[i][j - 1].color == color and all_pieces[i][j - 2].color == color:
@@ -146,11 +236,13 @@ func check_after_refill():
 	for i in width:
 		for j in height:
 			if all_pieces[i][j] != null and match_at(i, j, all_pieces[i][j].color):
+				cascade_depth += 1
 				find_matches()
 				get_parent().get_node("destroy_timer").start()
 				return
 	state = MOVE
 	move_checked = false
+	_maybe_finish_run()
 
 
 # input and swap
@@ -384,23 +476,32 @@ func _choose_promotion_index(run_coords: Array) -> int:
 
 # destroy and expansions
 func destroy_matched():
-	# rainbow expansion
 	_expand_rainbow_clears()
-	# striped expansion
 	_expand_line_clears_for_striped()
 
-	# destroy
-	var was_matched = false
+	var was_matched := false
+	var destroyed := 0
 	for i in width:
 		for j in height:
 			var p = _get_piece(i, j)
 			if p != null and p.matched:
 				was_matched = true
+				destroyed += 1
 				p.queue_free()
 				_set_piece(i, j, null)
 
 	move_checked = true
+
 	if was_matched:
+		_begin_run_after_successful_swap()
+
+		var multiplier := 1.0 + float(cascade_depth) * combo_bonus
+		var gained := int(round(float(destroyed * points_per_piece) * multiplier))
+		current_score += gained
+		_update_ui()
+		print("[Score] +%d (destroyed=%d, cascade=%d, x%.2f) total=%d"
+			% [gained, destroyed, cascade_depth, multiplier, current_score])
+
 		get_parent().get_node("collapse_timer").start()
 	else:
 		swap_back()
@@ -423,12 +524,10 @@ func _expand_rainbow_clears() -> void:
 	if rainbow_positions.size() == 0:
 		return
 
-	# we match 2 raindows, we clear the board
 	if rainbow_positions.size() >= 2:
 		_mark_all_pieces()
 		return
 
-	# a single rainbow, we clear the the color it was matched with
 	if matched_colors.size() == 0:
 		return
 	for i in width:
@@ -447,10 +546,10 @@ func _expand_line_clears_for_striped() -> void:
 			var p = _get_piece(i, j)
 			if p != null and p.matched:
 				if "special" in p:
-					if p.special == 1: # ROW
+					if p.special == 1:
 						if not rows_to_clear.has(j):
 							rows_to_clear.append(j)
-					elif p.special == 2: # COLUMN
+					elif p.special == 2:
 						if not cols_to_clear.has(i):
 							cols_to_clear.append(i)
 
@@ -509,6 +608,36 @@ func _on_collapse_timer_timeout():
 func _on_refill_timer_timeout():
 	refill_columns()
 
-func game_over():
+func _on_game_timer_timeout() -> void:
+	if game_mode != "TIME": return
+	if state == WAIT and not consumed_move:
+		pass
+	time_left = max(0, time_left - 1)
+	_update_ui()
+	if time_left <= 0:
+		if current_score >= target_score:
+			game_won()
+		else:
+			game_over()
+
+func game_won() -> void:
+	if game_ended: return
+	game_ended = true
 	state = WAIT
-	print("game over")
+	var msg = _msg_label()
+	if msg:
+		msg.visible = true
+		msg.text = " GANASTE !!:D"
+	print("GANASTE !! :D")
+	get_tree().paused = true
+
+func game_over() -> void:
+	if game_ended: return
+	game_ended = true
+	state = WAIT
+	var msg = _msg_label()
+	if msg:
+		msg.visible = true
+		msg.text = "PERDISTE XD"
+	print("PERDISTE ):")
+	get_tree().paused = true
