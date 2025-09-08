@@ -630,6 +630,12 @@ func game_won() -> void:
 		msg.text = " GANASTE !!:D"
 	print("GANASTE !! :D")
 	get_tree().paused = true
+##reiniciar después de 3s
+	await get_tree().create_timer(3.0, true).timeout
+	get_tree().paused = false
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+
+
 
 func game_over() -> void:
 	if game_ended: return
@@ -641,3 +647,7 @@ func game_over() -> void:
 		msg.text = "PERDISTE XD"
 	print("PERDISTE ):")
 	get_tree().paused = true
+	## 3 s y se reinucia !!
+	await get_tree().create_timer(3.0, true).timeout
+	get_tree().paused = false
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
